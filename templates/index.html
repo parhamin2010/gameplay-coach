@@ -400,13 +400,13 @@
       <div class="card" style="display:flex;flex-direction:column;gap:14px">
         <div>
           <label>Game / Topic</label>
-          <input type="text" id="game" placeholder="e.g. CS2 Competitive, Valorant Ranked" value="CS2 Competitive" />
+          <input type="text" id="game" placeholder="e.g. CS2 Competitive, Valorant Ranked" value="CS2 Competitive" oninput="saveSettings()" />
         </div>
         <div>
           <label>Comment Interval</label>
           <div class="interval-row">
             <input type="range" id="interval-range" min="15" max="120" step="5" value="60"
-              oninput="document.getElementById('interval-val').textContent = this.value + 's'" />
+              oninput="document.getElementById('interval-val').textContent = this.value + 's'; saveSettings()" />
             <span class="interval-val" id="interval-val">60s</span>
           </div>
         </div>
@@ -417,7 +417,7 @@
       <div class="section-label">Tone</div>
       <div class="card">
         <label>Coach Personality</label>
-        <select id="tone">
+        <select id="tone" onchange="saveSettings()">
           <option value="toxic-friend">Toxic Friend — never satisfied, always blaming</option>
           <option value="hype-man">Hype Man — unhinged enthusiast, spins everything</option>
           <option value="disappointed-dad">Disappointed Dad — not mad, just tired</option>
@@ -438,8 +438,8 @@
             <span class="platform-pill" id="twitch-pill">OFF</span>
           </div>
           <div class="platform-fields" id="twitch-fields">
-            <input type="password" id="twitch-token" placeholder="OAuth Token  (oauth:xxxxxxxxx)" />
-            <input type="text"     id="twitch-channel" placeholder="Channel name" />
+            <input type="password" id="twitch-token"   placeholder="OAuth Token  (oauth:xxxxxxxxx)" oninput="saveSettings()" />
+            <input type="text"     id="twitch-channel" placeholder="Channel name" oninput="saveSettings()" />
           </div>
         </div>
 
@@ -452,8 +452,8 @@
             <span class="platform-pill" id="youtube-pill">OFF</span>
           </div>
           <div class="platform-fields" id="youtube-fields">
-            <input type="password" id="youtube-key"      placeholder="YouTube Data API v3 Key" />
-            <input type="text"     id="youtube-video-id" placeholder="Live stream Video ID" />
+            <input type="password" id="youtube-key"      placeholder="YouTube Data API v3 Key" oninput="saveSettings()" />
+            <input type="text"     id="youtube-video-id" placeholder="Live stream Video ID" oninput="saveSettings()" />
           </div>
         </div>
 
@@ -466,7 +466,7 @@
             <span class="platform-pill" id="kick-pill">OFF</span>
           </div>
           <div class="platform-fields" id="kick-fields">
-            <input type="text" id="kick-channel" placeholder="Channel slug  (e.g. shroud)" />
+            <input type="text" id="kick-channel" placeholder="Channel slug  (e.g. shroud)" oninput="saveSettings()" />
           </div>
         </div>
 
@@ -477,7 +477,7 @@
       <div class="section-label">Voice</div>
       <div class="card">
         <label>ElevenLabs Voice</label>
-        <select id="voice">
+        <select id="voice" onchange="saveSettings()">
           {% for v in voices %}
           <option value="{{ v.id }}" {% if v.id == current_voice %}selected{% endif %}>{{ v.name }}</option>
           {% endfor %}
@@ -515,15 +515,61 @@
 
   function togglePlatform(p) {
     platforms[p] = !platforms[p];
-    document.getElementById(`${p}-pill`).textContent  = platforms[p] ? 'ON' : 'OFF';
+    document.getElementById(`${p}-pill`).textContent = platforms[p] ? 'ON' : 'OFF';
     document.getElementById(`${p}-pill`).classList.toggle('on', platforms[p]);
     document.getElementById(`${p}-fields`).classList.toggle('open', platforms[p]);
+    saveSettings();
   }
 
   function setMode(m) {
     mode = m;
     document.getElementById('btn-screenshot').classList.toggle('active', m === 'screenshot');
     document.getElementById('btn-cs2').classList.toggle('active', m === 'cs2');
+    saveSettings();
+  }
+
+  function saveSettings() {
+    try {
+      localStorage.setItem('coach_settings', JSON.stringify({
+        mode,
+        game:             document.getElementById('game').value,
+        interval:         document.getElementById('interval-range').value,
+        tone:             document.getElementById('tone').value,
+        voice:            document.getElementById('voice').value,
+        platforms:        { ...platforms },
+        twitch_token:     document.getElementById('twitch-token').value,
+        twitch_channel:   document.getElementById('twitch-channel').value,
+        youtube_key:      document.getElementById('youtube-key').value,
+        youtube_video_id: document.getElementById('youtube-video-id').value,
+        kick_channel:     document.getElementById('kick-channel').value,
+      }));
+    } catch(e) {}
+  }
+
+  function loadSettings() {
+    try {
+      const raw = localStorage.getItem('coach_settings');
+      if (!raw) return;
+      const s = JSON.parse(raw);
+      if (s.mode)     setMode(s.mode);
+      if (s.game)     document.getElementById('game').value = s.game;
+      if (s.interval) {
+        document.getElementById('interval-range').value = s.interval;
+        document.getElementById('interval-val').textContent = s.interval + 's';
+      }
+      if (s.tone)  document.getElementById('tone').value = s.tone;
+      if (s.voice) document.getElementById('voice').value = s.voice;
+      if (s.platforms) {
+        Object.keys(s.platforms).forEach(p => {
+          if (s.platforms[p] && !platforms[p]) togglePlatform(p);
+        });
+      }
+      if (s.twitch_token)     document.getElementById('twitch-token').value = s.twitch_token;
+      if (s.twitch_channel)   document.getElementById('twitch-channel').value = s.twitch_channel;
+      if (s.youtube_key)      document.getElementById('youtube-key').value = s.youtube_key;
+      if (s.youtube_video_id) document.getElementById('youtube-video-id').value = s.youtube_video_id;
+      if (s.kick_channel)     document.getElementById('kick-channel').value = s.kick_channel;
+    } catch(e) {}
   }
 
   function toggle() {
@@ -633,7 +679,8 @@
     return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
-  // Check if already running on page load
+  // Restore settings and check if already running on page load
+  loadSettings();
   fetch('/api/status').then(r => r.json()).then(d => {
     if (d.running) { setRunning(true); startSSE(); }
   });

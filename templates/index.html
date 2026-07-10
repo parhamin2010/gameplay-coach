@@ -366,6 +366,20 @@
     </div>
 
     <div>
+      <div class="section-label">Tone</div>
+      <div class="card">
+        <label>Coach Personality</label>
+        <select id="tone">
+          <option value="toxic-friend">Toxic Friend — never satisfied, always blaming</option>
+          <option value="hype-man">Hype Man — unhinged enthusiast, spins everything</option>
+          <option value="disappointed-dad">Disappointed Dad — not mad, just tired</option>
+          <option value="analyst">The Analyst — cold, clinical, data-driven roasts</option>
+          <option value="trash-talker">Trash Talker — zero filter, full disrespect</option>
+        </select>
+      </div>
+    </div>
+
+    <div>
       <div class="section-label">Voice</div>
       <div class="card">
         <label>ElevenLabs Voice</label>
@@ -420,6 +434,7 @@
       game:     document.getElementById('game').value.trim() || 'CS2 Competitive',
       interval: parseInt(document.getElementById('interval-range').value),
       voice_id: document.getElementById('voice').value,
+      tone:     document.getElementById('tone').value,
     };
 
     const res = await fetch('/api/start', {

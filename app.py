@@ -49,6 +49,7 @@ def start():
         game     = data.get("game", "CS2 Competitive")
         interval = str(data.get("interval", 30))
         voice_id = data.get("voice_id", os.getenv("ELEVENLABS_VOICE_ID", ""))
+        tone     = data.get("tone", "toxic-friend")
 
         script = "coach_cs2.py" if mode == "cs2" else "coach.py"
 
@@ -56,6 +57,7 @@ def start():
             **os.environ,
             "COACH_GAME":           game,
             "COACH_INTERVAL":       interval,
+            "COACH_TONE":           tone,
             "ELEVENLABS_VOICE_ID":  voice_id,
             "PYTHONIOENCODING":     "utf-8",
         }

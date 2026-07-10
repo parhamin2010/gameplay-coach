@@ -106,6 +106,26 @@ Opens the dashboard at `http://localhost:5000` automatically.
 
 ---
 
+## Chat Integration
+
+Connect your live chat so the coach can react to your viewers too.
+
+| Platform | What you need |
+|----------|--------------|
+| Twitch | OAuth token from [twitchapps.com/tmi](https://twitchapps.com/tmi) + channel name |
+| YouTube | YouTube Data API v3 key (Google Cloud Console) + live stream Video ID |
+| Kick | Channel slug only (e.g. `shroud`) — no API key needed |
+
+Toggle each platform ON in the dashboard and fill in the fields. The coach pulls recent messages each cycle and weaves them into commentary — reacting to what chat is saying, calling out when they're right or wrong, roasting viewers and player at the same time.
+
+Install `websockets` for Kick support:
+
+```bash
+pip install websockets
+```
+
+---
+
 ## Notes
 
 - Screenshot mode uses ~7,500 tokens per cycle — stay mindful of Groq's free tier limits

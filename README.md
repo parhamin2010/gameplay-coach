@@ -71,13 +71,19 @@ Steam/steamapps/common/Counter-Strike Global Offensive/game/csgo/cfg/
 
 ## Run
 
-Double-click `start.bat`, or:
+### First time
+Double-click `start.bat` — configure your settings in the dashboard, hit Start. Everything is saved automatically.
 
+### Every stream after that
+Double-click `quickstart.bat` — coach launches immediately with your last session settings. Browser opens showing the live feed. Zero clicks needed.
+
+### Manual
 ```bash
-python app.py
+python app.py           # normal start
+python app.py --autostart  # auto-launch with last saved settings
 ```
 
-Opens the dashboard at `http://localhost:5000` automatically.
+All settings (mode, game, interval, tone, voice, chat credentials) are remembered between sessions — you never have to configure twice.
 
 ---
 

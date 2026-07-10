@@ -186,6 +186,54 @@
       text-align: right;
     }
 
+    /* Chat platforms */
+    .platform {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .platform-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+    }
+    .platform-name {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--text);
+    }
+    .platform-pill {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      padding: 3px 10px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      cursor: pointer;
+      transition: all .2s;
+      background: transparent;
+    }
+    .platform-pill.on {
+      border-color: var(--green);
+      color: var(--green);
+    }
+    .platform-fields {
+      display: none;
+      flex-direction: column;
+      gap: 7px;
+    }
+    .platform-fields.open { display: flex; }
+    .platform-divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 4px 0;
+    }
+
     /* Start/Stop button */
     .btn-start {
       width: 100%;
@@ -380,6 +428,52 @@
     </div>
 
     <div>
+      <div class="section-label">Chat Integration</div>
+      <div class="card" style="display:flex;flex-direction:column;gap:14px">
+
+        <!-- Twitch -->
+        <div class="platform">
+          <div class="platform-header" onclick="togglePlatform('twitch')">
+            <span class="platform-name">Twitch</span>
+            <span class="platform-pill" id="twitch-pill">OFF</span>
+          </div>
+          <div class="platform-fields" id="twitch-fields">
+            <input type="password" id="twitch-token" placeholder="OAuth Token  (oauth:xxxxxxxxx)" />
+            <input type="text"     id="twitch-channel" placeholder="Channel name" />
+          </div>
+        </div>
+
+        <hr class="platform-divider" />
+
+        <!-- YouTube -->
+        <div class="platform">
+          <div class="platform-header" onclick="togglePlatform('youtube')">
+            <span class="platform-name">YouTube</span>
+            <span class="platform-pill" id="youtube-pill">OFF</span>
+          </div>
+          <div class="platform-fields" id="youtube-fields">
+            <input type="password" id="youtube-key"      placeholder="YouTube Data API v3 Key" />
+            <input type="text"     id="youtube-video-id" placeholder="Live stream Video ID" />
+          </div>
+        </div>
+
+        <hr class="platform-divider" />
+
+        <!-- Kick -->
+        <div class="platform">
+          <div class="platform-header" onclick="togglePlatform('kick')">
+            <span class="platform-name">Kick</span>
+            <span class="platform-pill" id="kick-pill">OFF</span>
+          </div>
+          <div class="platform-fields" id="kick-fields">
+            <input type="text" id="kick-channel" placeholder="Channel slug  (e.g. shroud)" />
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <div>
       <div class="section-label">Voice</div>
       <div class="card">
         <label>ElevenLabs Voice</label>
@@ -417,6 +511,14 @@
   let mode = 'screenshot';
   let running = false;
   let evtSource = null;
+  const platforms = { twitch: false, youtube: false, kick: false };
+
+  function togglePlatform(p) {
+    platforms[p] = !platforms[p];
+    document.getElementById(`${p}-pill`).textContent  = platforms[p] ? 'ON' : 'OFF';
+    document.getElementById(`${p}-pill`).classList.toggle('on', platforms[p]);
+    document.getElementById(`${p}-fields`).classList.toggle('open', platforms[p]);
+  }
 
   function setMode(m) {
     mode = m;
@@ -435,6 +537,13 @@
       interval: parseInt(document.getElementById('interval-range').value),
       voice_id: document.getElementById('voice').value,
       tone:     document.getElementById('tone').value,
+      chat: {
+        twitch_token:    document.getElementById('twitch-token').value.trim(),
+        twitch_channel:  document.getElementById('twitch-channel').value.trim(),
+        youtube_api_key: document.getElementById('youtube-key').value.trim(),
+        youtube_video_id:document.getElementById('youtube-video-id').value.trim(),
+        kick_channel:    document.getElementById('kick-channel').value.trim(),
+      },
     };
 
     const res = await fetch('/api/start', {

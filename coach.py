@@ -19,6 +19,7 @@ import numpy as np
 import sounddevice as sd
 from PIL import Image
 from dotenv import load_dotenv
+from chat_reader import start_chat_readers, get_recent_chat
 
 load_dotenv()
 
@@ -178,6 +179,7 @@ Rules:
 - React specifically to what happened in the screenshots — no generic lines
 - No emojis. No "Called it". Vary your reactions every time.
 - If the player addressed you directly, respond to THEM first in your tone, then factor in the game.
+- If live chat messages are provided, you may reference them in your comment — but game always comes first. React to chat if it's funny, wrong, or matches what just happened.
 
 When the player talks back, stay in character and reference both what they said and what's on screen:
 {t['clap_back']}
@@ -255,7 +257,7 @@ def capture_screen() -> str:
 
 # ─── AI Coach (Groq) ──────────────────────────────────────────────────────────
 
-def get_commentary(shots: list[str], prompt: str, voice: str = "") -> str:
+def get_commentary(shots: list[str], prompt: str, voice: str = "", chat: list[str] = None) -> str:
     content = [
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
         for b64 in shots
@@ -272,6 +274,14 @@ def get_commentary(shots: list[str], prompt: str, voice: str = "") -> str:
             f"These are {len(shots)} screenshots taken over the last minute of gameplay, in order. "
             "Give your coaching comment."
         )
+
+    if chat:
+        user_text += (
+            f"\n\nLive chat ({len(chat)} messages):\n"
+            + "\n".join(f"  {m}" for m in chat)
+            + "\nGame first. If chat is saying something relevant or hilarious, mention it."
+        )
+
     content.append({"type": "text", "text": user_text})
 
     client = Groq(api_key=GROQ_KEY)
@@ -335,6 +345,7 @@ def run():
     print("\n  Online. Watching.\n", flush=True)
 
     mic_stream = start_mic()
+    start_chat_readers()
 
     try:
         while True:
@@ -363,7 +374,8 @@ def run():
             else:
                 try:
                     print(f"[{ts}] Processing...", flush=True)
-                    commentary = get_commentary(shots, prompt, voice)
+                    chat = get_recent_chat(10)
+                    commentary = get_commentary(shots, prompt, voice, chat)
                     print(f"\n  COACH >> {commentary}\n", flush=True)
                     speak(commentary)
                 except Exception as e:

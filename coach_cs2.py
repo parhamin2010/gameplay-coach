@@ -14,6 +14,7 @@ from groq import Groq
 from elevenlabs.client import ElevenLabs
 from playsound import playsound
 from dotenv import load_dotenv
+from chat_reader import start_chat_readers, get_recent_chat
 
 load_dotenv()
 
@@ -262,7 +263,8 @@ def process_gsi(data: dict):
             summary = build_summary()
 
     if should_comment:
-        threading.Thread(target=trigger_comment, args=(summary,), daemon=True).start()
+        chat = get_recent_chat(10)
+        threading.Thread(target=trigger_comment, args=(summary, chat), daemon=True).start()
 
 def build_summary() -> str:
     recent = "\n".join(f"  - {e}" for e in list(state.events)[-5:]) or "  - No recent events"
@@ -276,14 +278,21 @@ def build_summary() -> str:
 
 # ─── AI + TTS ─────────────────────────────────────────────────────────────────
 
-def trigger_comment(summary: str):
+def trigger_comment(summary: str, chat: list[str] = None):
     try:
+        user_content = f"Game state:\n{summary}\n\nGive your coaching comment."
+        if chat:
+            user_content += (
+                f"\n\nLive chat ({len(chat)} messages):\n"
+                + "\n".join(f"  {m}" for m in chat)
+                + "\nGame first. If chat is saying something relevant or hilarious, mention it."
+            )
         client = Groq(api_key=GROQ_KEY)
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",   # text-only — fast, cheap, sharp
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": prompt},
-                {"role": "user",   "content": f"Game state:\n{summary}\n\nGive your coaching comment."},
+                {"role": "user",   "content": user_content},
             ],
             max_tokens=MAX_TOKENS,
         )
@@ -354,6 +363,8 @@ def run():
     print(f"  Model  : llama-3.3-70b (text-only, no image tokens)")
     print(f"  Voice  : ElevenLabs ({ELEVENLABS_VOICE_ID})")
     print(f"\n  Waiting for CS2 to connect...\n")
+
+    start_chat_readers()
 
     server = HTTPServer(("localhost", GSI_PORT), GSIHandler)
     try:

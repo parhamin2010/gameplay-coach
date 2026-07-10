@@ -50,6 +50,7 @@ def start():
         interval = str(data.get("interval", 30))
         voice_id = data.get("voice_id", os.getenv("ELEVENLABS_VOICE_ID", ""))
         tone     = data.get("tone", "toxic-friend")
+        chat     = data.get("chat", {})
 
         script = "coach_cs2.py" if mode == "cs2" else "coach.py"
 
@@ -59,6 +60,11 @@ def start():
             "COACH_INTERVAL":       interval,
             "COACH_TONE":           tone,
             "ELEVENLABS_VOICE_ID":  voice_id,
+            "TWITCH_TOKEN":         chat.get("twitch_token", ""),
+            "TWITCH_CHANNEL":       chat.get("twitch_channel", ""),
+            "YOUTUBE_API_KEY":      chat.get("youtube_api_key", ""),
+            "YOUTUBE_VIDEO_ID":     chat.get("youtube_video_id", ""),
+            "KICK_CHANNEL":         chat.get("kick_channel", ""),
             "PYTHONIOENCODING":     "utf-8",
         }
 

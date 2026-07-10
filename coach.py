@@ -58,14 +58,25 @@ Rules:
 - ONE sentence only. Never more.
 - React specifically to what happened in the screenshots — no generic lines
 - No emojis. No "Called it". Vary your reactions every time.
+- If the player addressed you directly, respond to THEM first — clap back, don't ignore it — then factor in the game.
 
-Examples:
+When the player talks back:
+- You don't take disrespect lying down, but you don't get loud either — you get smug
+- Hit them with something they can't argue with
+- Reference what they said AND what's on screen
+
+Examples (game only):
 - "You peeked that angle and I watched you walk toward it like you had a plan."
 - "Okay that kill was good, don't worry you'll find a way to ruin it."
 - "Why. Why did you push that. Give me a reason."
 - "Low health, no cover, one enemy left — you pushed, of course you pushed."
 - "That was genuinely impressive, write it down, it won't happen again."
 - "I'm not even mad, I'm just tired, rotate please."
+
+Examples (player talked back):
+- "Bro challenged me and then died to a bot, I rest my case."
+- "Yeah okay big talk from the guy with 34 HP hiding in a corner."
+- "If you played half as well as you argued you'd actually be scary."
 """
 
 # ─── Microphone Recording ─────────────────────────────────────────────────────
@@ -87,7 +98,10 @@ def start_mic() -> sd.InputStream:
     stream.start()
     return stream
 
+COACH_TRIGGERS = ("coach",)
+
 def capture_and_transcribe() -> str:
+    """Transcribe the mic buffer. Returns text only if player addressed the coach."""
     with _mic_lock:
         data = np.array(list(_mic_buf), dtype=np.float32)
 
@@ -108,10 +122,18 @@ def capture_and_transcribe() -> str:
             file=("mic.wav", wav_buf.getvalue()),
             model="whisper-large-v3-turbo",
         )
-        return result.text.strip()
+        text = result.text.strip()
+        # Only return if the player directly addressed the coach
+        if any(t in text.lower() for t in COACH_TRIGGERS):
+            return text
+        return ""
     except Exception as e:
         print(f"  [Whisper error: {e}]", flush=True)
         return ""
+
+def clear_mic_buffer():
+    with _mic_lock:
+        _mic_buf.clear()
 
 # ─── Screen Capture ───────────────────────────────────────────────────────────
 
@@ -135,8 +157,8 @@ def get_commentary(shots: list[str], prompt: str, voice: str = "") -> str:
     if voice:
         user_text = (
             f"These are {len(shots)} screenshots taken over the last minute of gameplay, in order.\n"
-            f"Sir just said: \"{voice}\"\n"
-            "Give your coaching comment."
+            f"PRIORITY: The player just fired back at you — they said: \"{voice}\"\n"
+            "Respond to what they said first (clap back), then tie it to what you see in the game. One sentence."
         )
     else:
         user_text = (
@@ -200,7 +222,10 @@ def run():
     print(f"\n  Game   : {game or 'Not specified'}")
     print(f"  Interval: {interval}s  |  Shots: {NUM_SHOTS} (every {shot_interval}s)")
     print(f"  Voice  : ElevenLabs ({ELEVENLABS_VOICE_ID})")
+    print("  Mic    : ON — say 'Coach' to talk back")
     print("\n  Online. Watching.\n", flush=True)
+
+    mic_stream = start_mic()
 
     try:
         while True:
@@ -217,7 +242,12 @@ def run():
                     time.sleep(shot_interval)
 
             ts = datetime.now().strftime("%H:%M:%S")
-            voice = ""  # mic disabled — re-enable by calling capture_and_transcribe()
+
+            # Check if player addressed the coach during this gap
+            voice = capture_and_transcribe()
+            if voice:
+                print(f"  [Mic] Player said: {voice}", flush=True)
+                clear_mic_buffer()  # don't re-use same voice next cycle
 
             if not shots:
                 print(f"[{ts}] No screenshots captured, skipping cycle.", flush=True)
@@ -231,7 +261,8 @@ def run():
                     print(f"[{ts}] Error: {e}", flush=True)
 
     finally:
-        pass
+        mic_stream.stop()
+        mic_stream.close()
 
 
 if __name__ == "__main__":

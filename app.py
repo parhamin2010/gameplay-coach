@@ -56,6 +56,13 @@ def _launch_coach(data: dict):
     interval = str(data.get("interval", 60))
     voice_id = data.get("voice_id", os.getenv("ELEVENLABS_VOICE_ID", ""))
     tone     = data.get("tone", "toxic-friend")
+    model_raw = data.get("model", "")
+    if ":" in model_raw:
+        provider, model = model_raw.split(":", 1)
+    else:
+        provider, model = "groq", model_raw
+    volume   = str(data.get("volume", 100))
+    context  = data.get("context", {})
     chat     = data.get("chat", {})
 
     script = "coach_cs2.py" if mode == "cs2" else "coach.py"
@@ -65,6 +72,10 @@ def _launch_coach(data: dict):
         "COACH_GAME":           game,
         "COACH_INTERVAL":       interval,
         "COACH_TONE":           tone,
+        "COACH_PROVIDER":       provider,
+        "COACH_MODEL":          model,
+        "COACH_VOLUME":         volume,
+        "COACH_CONTEXT":        json.dumps(context),
         "ELEVENLABS_VOICE_ID":  voice_id,
         "TWITCH_TOKEN":         chat.get("twitch_token", ""),
         "TWITCH_CHANNEL":       chat.get("twitch_channel", ""),
@@ -92,7 +103,7 @@ def _launch_coach(data: dict):
         _log_queue.put("__STOPPED__")
 
     threading.Thread(target=_read, daemon=True).start()
-    _log_queue.put(f"Started in {mode.upper()} mode — {game} — every {interval}s [{tone}]")
+    _log_queue.put(f"Started in {mode.upper()} mode — {game} — every {interval}s [{tone}] [{provider}: {model or 'default model'}]")
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 

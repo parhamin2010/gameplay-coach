@@ -186,6 +186,27 @@
       text-align: right;
     }
 
+    /* Commentary context checkboxes */
+    .context-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px 12px;
+    }
+    .context-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--text);
+    }
+    .context-item input[type="checkbox"] {
+      accent-color: var(--accent);
+      width: 15px;
+      height: 15px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
     /* Chat platforms */
     .platform {
       display: flex;
@@ -428,6 +449,31 @@
     </div>
 
     <div>
+      <div class="section-label">AI Model</div>
+      <div class="card">
+        <label>Commentary Model</label>
+        <select id="model" onchange="saveSettings()"></select>
+      </div>
+    </div>
+
+    <div id="context-section" style="display:none">
+      <div class="section-label">Commentary Context (CS2 GSI)</div>
+      <div class="card">
+        <div class="context-grid">
+          <div class="context-item"><input type="checkbox" id="ctx-health" checked onchange="saveSettings()"><span>Health &amp; Armor</span></div>
+          <div class="context-item"><input type="checkbox" id="ctx-weapon" checked onchange="saveSettings()"><span>Weapon &amp; Ammo</span></div>
+          <div class="context-item"><input type="checkbox" id="ctx-kda" checked onchange="saveSettings()"><span>Kills/Deaths/Assists</span></div>
+          <div class="context-item"><input type="checkbox" id="ctx-scoreboard" checked onchange="saveSettings()"><span>Scoreboard</span></div>
+          <div class="context-item"><input type="checkbox" id="ctx-money" checked onchange="saveSettings()"><span>Money &amp; Equipment</span></div>
+          <div class="context-item"><input type="checkbox" id="ctx-status_effects" checked onchange="saveSettings()"><span>Status Effects</span></div>
+          <div class="context-item"><input type="checkbox" id="ctx-timer" checked onchange="saveSettings()"><span>Round/Bomb Timer</span></div>
+          <div class="context-item"><input type="checkbox" id="ctx-clutch" checked onchange="saveSettings()"><span>Clutch Detection</span></div>
+          <div class="context-item"><input type="checkbox" id="ctx-round_meta" checked onchange="saveSettings()"><span>Round Meta</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div>
       <div class="section-label">Chat Integration</div>
       <div class="card" style="display:flex;flex-direction:column;gap:14px">
 
@@ -475,13 +521,23 @@
 
     <div>
       <div class="section-label">Voice</div>
-      <div class="card">
-        <label>ElevenLabs Voice</label>
-        <select id="voice" onchange="saveSettings()">
-          {% for v in voices %}
-          <option value="{{ v.id }}" {% if v.id == current_voice %}selected{% endif %}>{{ v.name }}</option>
-          {% endfor %}
-        </select>
+      <div class="card" style="display:flex;flex-direction:column;gap:14px">
+        <div>
+          <label>ElevenLabs Voice</label>
+          <select id="voice" onchange="saveSettings()">
+            {% for v in voices %}
+            <option value="{{ v.id }}" {% if v.id == current_voice %}selected{% endif %}>{{ v.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label>Volume</label>
+          <div class="interval-row">
+            <input type="range" id="volume-range" min="0" max="100" step="5" value="100"
+              oninput="document.getElementById('volume-val').textContent = this.value + '%'; saveSettings()" />
+            <span class="interval-val" id="volume-val">100%</span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -513,6 +569,29 @@
   let evtSource = null;
   const platforms = { twitch: false, youtube: false, kick: false };
 
+  // Screenshot mode needs a vision-capable model; CS2 GSI mode is text-only.
+  // Values are "provider:model" — split apart server-side before launching the coach.
+  const MODEL_OPTIONS = {
+    screenshot: [
+      { value: 'groq:meta-llama/llama-4-scout-17b-16e-instruct',    label: 'Groq — Llama 4 Scout — fast (default)' },
+      { value: 'groq:meta-llama/llama-4-maverick-17b-128e-instruct', label: 'Groq — Llama 4 Maverick — smarter, sharper humor' },
+      { value: 'gemini:gemini-2.0-flash', label: 'Gemini 2.0 Flash — free tier, sharp humor' },
+    ],
+    cs2: [
+      { value: 'groq:llama-3.3-70b-versatile', label: 'Groq — Llama 3.3 70B — sharp, witty (default)' },
+      { value: 'groq:llama-3.1-8b-instant',    label: 'Groq — Llama 3.1 8B — fastest, less witty' },
+      { value: 'gemini:gemini-2.0-flash',      label: 'Gemini 2.0 Flash — free tier, sharp humor' },
+    ],
+  };
+
+  function renderModelOptions(preserveValue) {
+    const select = document.getElementById('model');
+    const wanted = preserveValue !== undefined ? preserveValue : select.value;
+    const options = MODEL_OPTIONS[mode] || MODEL_OPTIONS.screenshot;
+    select.innerHTML = options.map(o => `<option value="${o.value}">${o.label}</option>`).join('');
+    if (options.some(o => o.value === wanted)) select.value = wanted;
+  }
+
   function togglePlatform(p) {
     platforms[p] = !platforms[p];
     document.getElementById(`${p}-pill`).textContent = platforms[p] ? 'ON' : 'OFF';
@@ -521,10 +600,27 @@
     saveSettings();
   }
 
+  const CONTEXT_KEYS = ['health', 'weapon', 'kda', 'scoreboard', 'money', 'status_effects', 'timer', 'clutch', 'round_meta'];
+
+  function getContext() {
+    const ctx = {};
+    CONTEXT_KEYS.forEach(k => ctx[k] = document.getElementById(`ctx-${k}`).checked);
+    return ctx;
+  }
+
+  function setContext(ctx) {
+    if (!ctx) return;
+    CONTEXT_KEYS.forEach(k => {
+      if (k in ctx) document.getElementById(`ctx-${k}`).checked = !!ctx[k];
+    });
+  }
+
   function setMode(m) {
     mode = m;
     document.getElementById('btn-screenshot').classList.toggle('active', m === 'screenshot');
     document.getElementById('btn-cs2').classList.toggle('active', m === 'cs2');
+    document.getElementById('context-section').style.display = (m === 'cs2') ? '' : 'none';
+    renderModelOptions();
     saveSettings();
   }
 
@@ -536,6 +632,9 @@
         interval:         document.getElementById('interval-range').value,
         tone:             document.getElementById('tone').value,
         voice:            document.getElementById('voice').value,
+        model:            document.getElementById('model').value,
+        volume:           document.getElementById('volume-range').value,
+        context:          getContext(),
         platforms:        { ...platforms },
         twitch_token:     document.getElementById('twitch-token').value,
         twitch_channel:   document.getElementById('twitch-channel').value,
@@ -559,6 +658,12 @@
       }
       if (s.tone)  document.getElementById('tone').value = s.tone;
       if (s.voice) document.getElementById('voice').value = s.voice;
+      if (s.model) renderModelOptions(s.model);
+      if (s.volume) {
+        document.getElementById('volume-range').value = s.volume;
+        document.getElementById('volume-val').textContent = s.volume + '%';
+      }
+      if (s.context) setContext(s.context);
       if (s.platforms) {
         Object.keys(s.platforms).forEach(p => {
           if (s.platforms[p] && !platforms[p]) togglePlatform(p);
@@ -583,6 +688,9 @@
       interval: parseInt(document.getElementById('interval-range').value),
       voice_id: document.getElementById('voice').value,
       tone:     document.getElementById('tone').value,
+      model:    document.getElementById('model').value,
+      volume:   parseInt(document.getElementById('volume-range').value),
+      context:  getContext(),
       chat: {
         twitch_token:    document.getElementById('twitch-token').value.trim(),
         twitch_channel:  document.getElementById('twitch-channel').value.trim(),
@@ -686,6 +794,7 @@
   }
 
   // Restore settings and check if already running on page load
+  renderModelOptions();
   loadSettings();
   autoTogglePlatforms();
   fetch('/api/status').then(r => r.json()).then(d => {

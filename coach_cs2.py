@@ -1,9 +1,9 @@
+import asyncio
 import io
 import json
 import os
 import random
 import sys
-import tempfile
 import threading
 import time
 import wave
@@ -14,8 +14,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 sys.stdout.reconfigure(encoding="utf-8")
 
 from groq import Groq
+from google import genai
+from google.genai import types as genai_types
 from elevenlabs.client import ElevenLabs
-from playsound import playsound
+import edge_tts
+import pygame
 import numpy as np
 import sounddevice as sd
 from dotenv import load_dotenv
@@ -30,8 +33,32 @@ MIN_COMMENT_GAP  = 20    # minimum seconds between comments
 PERIODIC_COMMENT = 60    # also comment every N seconds even with no events
 MAX_TOKENS       = 80
 GROQ_KEY         = os.getenv("GROQ_API_KEY", "")
+GEMINI_KEY       = os.getenv("GEMINI_API_KEY", "")
+COACH_PROVIDER   = (os.getenv("COACH_PROVIDER") or "groq").lower()
+DEFAULT_MODELS   = {
+    "groq":   "llama-3.3-70b-versatile",
+    "gemini": "gemini-2.0-flash",
+}
+COACH_MODEL      = os.getenv("COACH_MODEL") or DEFAULT_MODELS.get(COACH_PROVIDER, DEFAULT_MODELS["groq"])
+COACH_VOLUME     = max(0.0, min(1.0, float(os.getenv("COACH_VOLUME", "100")) / 100.0))
+COACH_TONE       = os.getenv("COACH_TONE", "toxic-friend")
 ELEVENLABS_KEY        = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID   = os.getenv("ELEVENLABS_VOICE_ID", "")
+FALLBACK_TTS_VOICE    = "en-US-GuyNeural"  # edge-tts (free, no quota) — used if ElevenLabs fails
+
+BOMB_URGENT_SEC  = 10    # announce bomb timer once it's this close to exploding
+
+# Which GSI-derived info gets fed to the LLM — toggled from the dashboard's
+# Commentary Context panel and passed in as a JSON blob via COACH_CONTEXT.
+DEFAULT_CONTEXT = {
+    "health": True, "weapon": True, "kda": True, "scoreboard": True,
+    "money": True, "status_effects": True, "timer": True,
+    "clutch": True, "round_meta": True,
+}
+try:
+    COACH_CONTEXT = {**DEFAULT_CONTEXT, **json.loads(os.getenv("COACH_CONTEXT", "") or "{}")}
+except Exception:
+    COACH_CONTEXT = DEFAULT_CONTEXT
 
 MIC_SAMPLE_RATE = 16000
 WAKE_POLL_SEC   = 3    # how often we check the mic for "Coach"
@@ -145,6 +172,13 @@ TONES = {
     },
 }
 
+def _fallback_line(tone: str) -> str:
+    """Canned in-character line pulled from the tone's own examples — used when
+    the Groq API is unavailable (quota/rate-limit) so the coach never goes silent."""
+    examples = TONES.get(tone, TONES["toxic-friend"])["examples"]
+    lines = [l.strip().lstrip("- ").strip('"') for l in examples.strip().split("\n") if l.strip()]
+    return random.choice(lines)
+
 def build_prompt(game: str, tone: str = "toxic-friend") -> str:
     t = TONES.get(tone, TONES["toxic-friend"])
     return f"""\
@@ -237,6 +271,8 @@ class GameState:
         self.deaths       = 0
         self.assists      = 0
         self.round_kills  = 0
+        self.round_killhs   = 0
+        self.round_totaldmg = 0
         self.round_phase  = ""
         self.map_phase    = ""
         self.ct_score     = 0
@@ -252,12 +288,53 @@ class GameState:
         self.my_steamid   = ""
         self.my_team      = ""
         self.allplayers   = {}
+
+        # Status effects + economy
+        self.money        = 0
+        self.equip_value  = 0
+        self.flashed      = 0
+        self.smoked       = 0
+        self.burning      = 0
+        self.helmet       = False
+
+        # Round/map meta
+        self.round_num    = 0
+        self.ct_losses    = 0
+        self.t_losses     = 0
+        self.ct_timeouts  = 0
+        self.t_timeouts   = 0
+        self.phase_ends_in = 0.0
+
+        # Clutch tracking
+        self.in_clutch         = False
+        self.clutch_enemies    = 0
+        self.clutch_announced  = False
+        self.bomb_urgent_announced = False
+
         self._lock        = threading.Lock()
 
 state = GameState()
 prompt = ""
 
 # ─── GSI Processing ───────────────────────────────────────────────────────────
+
+def _to_int(value, fallback: int) -> int:
+    """GSI is inconsistent about sending numbers as JSON numbers vs strings — coerce safely."""
+    if value is None:
+        return fallback
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+def _count_alive(team: str, exclude_self: bool = False) -> int:
+    count = 0
+    for steamid, p in state.allplayers.items():
+        if exclude_self and steamid == state.my_steamid:
+            continue
+        if p.get("team") == team and p.get("state", {}).get("health", 0) > 0:
+            count += 1
+    return count
 
 def process_gsi(data: dict):
     with state._lock:
@@ -266,17 +343,37 @@ def process_gsi(data: dict):
         stats       = player.get("match_stats", {})
         round_data  = data.get("round", {})
         map_data    = data.get("map", {})
+        ct_team     = map_data.get("team_ct", {})
+        t_team      = map_data.get("team_t", {})
+        pc          = data.get("phase_countdowns", {})
 
         new_health      = ps.get("health", state.health)
         new_armor       = ps.get("armor", state.armor)
+        new_money       = _to_int(ps.get("money"), state.money)
+        new_equip_value = _to_int(ps.get("equip_value"), state.equip_value)
+        new_flashed     = _to_int(ps.get("flashed"), state.flashed)
+        new_smoked      = _to_int(ps.get("smoked"), state.smoked)
+        new_burning     = _to_int(ps.get("burning"), state.burning)
+        new_helmet      = ps.get("helmet", state.helmet)
+        new_round_killhs   = _to_int(ps.get("round_killhs"), state.round_killhs)
+        new_round_totaldmg = _to_int(ps.get("round_totaldmg"), state.round_totaldmg)
         new_kills       = stats.get("kills", state.kills)
         new_deaths      = stats.get("deaths", state.deaths)
         new_assists     = stats.get("assists", state.assists)
         new_round_phase = round_data.get("phase", state.round_phase)
         new_map_phase   = map_data.get("phase", state.map_phase)
         new_bomb        = round_data.get("bomb", state.bomb)
-        new_ct          = map_data.get("team_ct", {}).get("score", state.ct_score)
-        new_t           = map_data.get("team_t", {}).get("score", state.t_score)
+        new_ct          = ct_team.get("score", state.ct_score)
+        new_t           = t_team.get("score", state.t_score)
+        new_round_num   = _to_int(map_data.get("round"), state.round_num)
+        new_ct_losses   = _to_int(ct_team.get("consecutive_round_losses"), state.ct_losses)
+        new_t_losses    = _to_int(t_team.get("consecutive_round_losses"), state.t_losses)
+        new_ct_timeouts = _to_int(ct_team.get("timeouts_remaining"), state.ct_timeouts)
+        new_t_timeouts  = _to_int(t_team.get("timeouts_remaining"), state.t_timeouts)
+        try:
+            new_phase_ends_in = float(pc.get("phase_ends_in", state.phase_ends_in))
+        except (TypeError, ValueError):
+            new_phase_ends_in = state.phase_ends_in
 
         # Identity + scoreboard (for teammate comparisons)
         state.my_steamid = player.get("steamid", state.my_steamid)
@@ -295,10 +392,13 @@ def process_gsi(data: dict):
                 break
 
         triggered_events = []
+        urgent = False
 
         # New round starting — round-scoped counters must not bleed into the next round
         if new_round_phase == "freezetime" and state.round_phase != "freezetime":
             state.round_kills = 0
+            state.clutch_announced = False
+            state.bomb_urgent_announced = False
 
         # Death — health hitting 0 is the primary signal, but GSI's 0.5s throttle can
         # occasionally skip that exact frame, so a match_stats.deaths increment is an
@@ -334,19 +434,50 @@ def process_gsi(data: dict):
             elif new_bomb == "exploded":
                 triggered_events.append("BOMB EXPLODED — round lost")
 
+        # Bomb urgency — the exact "it's about to go off" moment, announced once per plant
+        if new_bomb == "planted" and new_phase_ends_in and new_phase_ends_in <= BOMB_URGENT_SEC and not state.bomb_urgent_announced:
+            triggered_events.append(f"BOMB URGENT — exploding in {new_phase_ends_in:.0f}s")
+            state.bomb_urgent_announced = True
+            urgent = True
+
         # Low health
         if 0 < new_health < 30 and state.health >= 30:
             triggered_events.append(f"LOW HEALTH — only {new_health} HP left")
+
+        # Clutch detection — the player is the last one alive on their team, facing 1+ enemies
+        enemy_team = "T" if state.my_team == "CT" else "CT"
+        teammates_alive = _count_alive(state.my_team, exclude_self=True) if state.allplayers else 0
+        enemies_alive   = _count_alive(enemy_team) if state.allplayers else 0
+        new_in_clutch = bool(new_health > 0 and state.allplayers and teammates_alive == 0 and enemies_alive >= 1)
+        if new_in_clutch:
+            state.clutch_enemies = enemies_alive
+            if not state.clutch_announced:
+                triggered_events.append(f"CLUTCH — 1v{enemies_alive}, last one alive on {state.my_team}")
+                state.clutch_announced = True
+                urgent = True
+        state.in_clutch = new_in_clutch
 
         # Round ended
         if new_round_phase == "over" and state.round_phase != "over":
             win_team = round_data.get("win_team", "")
             win_note = f" — {win_team} won the round" if win_team else ""
-            triggered_events.append(f"ROUND OVER — CT:{new_ct} T:{new_t}{win_note}")
+            if state.clutch_announced and win_team and win_team == state.my_team:
+                triggered_events.append(f"CLUTCH WON! 1v{state.clutch_enemies} secured{win_note}")
+                urgent = True
+            else:
+                triggered_events.append(f"ROUND OVER — CT:{new_ct} T:{new_t}{win_note}")
 
         # Update state
         state.health      = new_health
         state.armor       = new_armor
+        state.money       = new_money
+        state.equip_value = new_equip_value
+        state.flashed     = new_flashed
+        state.smoked      = new_smoked
+        state.burning     = new_burning
+        state.helmet      = new_helmet
+        state.round_killhs   = new_round_killhs
+        state.round_totaldmg = new_round_totaldmg
         state.kills       = new_kills
         state.deaths      = new_deaths
         state.assists     = new_assists
@@ -355,6 +486,12 @@ def process_gsi(data: dict):
         state.bomb        = new_bomb
         state.ct_score    = new_ct
         state.t_score     = new_t
+        state.round_num   = new_round_num
+        state.ct_losses   = new_ct_losses
+        state.t_losses    = new_t_losses
+        state.ct_timeouts = new_ct_timeouts
+        state.t_timeouts  = new_t_timeouts
+        state.phase_ends_in = new_phase_ends_in
 
         # Only keep events from live match time — a warmup kill queued here would
         # otherwise leak into the first real comment once the round goes live.
@@ -365,8 +502,11 @@ def process_gsi(data: dict):
         now = time.time()
         # Gate everything on the map actually being live — warmup/intermission kills
         # and deaths aren't real match events and shouldn't trigger commentary.
+        # Urgent events (bomb about to blow, clutch starting/won) bypass the cooldown
+        # entirely since they're one-shot, flag-gated moments that matter in the instant.
         should_comment = state.map_phase == "live" and (
-            (triggered_events and (now - state.last_comment) > MIN_COMMENT_GAP)
+            urgent
+            or (triggered_events and (now - state.last_comment) > MIN_COMMENT_GAP)
             or ((now - state.last_periodic) > PERIODIC_COMMENT and state.alive)
         )
 
@@ -378,7 +518,7 @@ def process_gsi(data: dict):
 
     if should_comment:
         chat = get_recent_chat(10)
-        threading.Thread(target=trigger_comment, args=(summary, chat), daemon=True).start()
+        threading.Thread(target=trigger_comment, args=(summary, chat), kwargs={"urgent": urgent}, daemon=True).start()
 
 def build_scoreboard() -> str:
     """Ranked K/D scoreboard with teammates vs enemies, self marked out."""
@@ -407,16 +547,49 @@ def build_scoreboard() -> str:
     return "Scoreboard:\n" + "\n".join(lines)
 
 def build_summary() -> str:
-    recent = "\n".join(f"  - {e}" for e in list(state.events)[-5:]) or "  - No recent events"
-    parts = [
-        f"Score: CT {state.ct_score} - T {state.t_score} | Round: {state.round_phase}",
-        f"Status: {'ALIVE' if state.alive else 'DEAD'} | HP: {state.health} | Armor: {state.armor}",
-        f"Weapon: {state.weapon} | Ammo: {state.ammo_clip}/{state.ammo_reserve}",
-        f"Match: {state.kills}K / {state.deaths}D / {state.assists}A",
-        f"Recent events:\n{recent}",
-    ]
+    parts = []
 
-    if random.random() < 0.4:
+    if COACH_CONTEXT.get("round_meta", True):
+        parts.append(
+            f"Round {state.round_num} | Score: CT {state.ct_score} - T {state.t_score} | Round phase: {state.round_phase}"
+            + (f" | CT loss streak: {state.ct_losses}, timeouts: {state.ct_timeouts}" if state.ct_losses else "")
+            + (f" | T loss streak: {state.t_losses}, timeouts: {state.t_timeouts}" if state.t_losses else "")
+        )
+
+    if COACH_CONTEXT.get("health", True):
+        parts.append(f"Status: {'ALIVE' if state.alive else 'DEAD'} | HP: {state.health} | Armor: {state.armor}{' + helmet' if state.helmet else ''}")
+
+    if COACH_CONTEXT.get("weapon", True):
+        parts.append(f"Weapon: {state.weapon} | Ammo: {state.ammo_clip}/{state.ammo_reserve}")
+
+    if COACH_CONTEXT.get("kda", True):
+        parts.append(f"Match: {state.kills}K / {state.deaths}D / {state.assists}A")
+
+    if COACH_CONTEXT.get("money", True):
+        parts.append(f"Money: ${state.money} | Equip value: ${state.equip_value}")
+
+    if COACH_CONTEXT.get("status_effects", True):
+        effects = []
+        if state.flashed:
+            effects.append(f"flashed ({state.flashed})")
+        if state.smoked:
+            effects.append("in smoke")
+        if state.burning:
+            effects.append("burning")
+        if effects:
+            parts.append("Status effects: " + ", ".join(effects))
+
+    if COACH_CONTEXT.get("timer", True) and state.phase_ends_in:
+        label = "Bomb timer" if state.bomb == "planted" else "Round timer"
+        parts.append(f"{label}: {state.phase_ends_in:.0f}s left")
+
+    if COACH_CONTEXT.get("clutch", True) and state.in_clutch:
+        parts.append(f"CLUTCH IN PROGRESS: 1v{state.clutch_enemies} — last one alive on {state.my_team}")
+
+    recent = "\n".join(f"  - {e}" for e in list(state.events)[-5:]) or "  - No recent events"
+    parts.append(f"Recent events:\n{recent}")
+
+    if COACH_CONTEXT.get("scoreboard", True) and random.random() < 0.4:
         scoreboard = build_scoreboard()
         if scoreboard:
             parts.append(scoreboard)
@@ -425,61 +598,102 @@ def build_summary() -> str:
 
 # ─── AI + TTS ─────────────────────────────────────────────────────────────────
 
-def trigger_comment(summary: str, chat: list[str] = None, voice: str = ""):
-    try:
-        if voice:
-            user_content = (
-                f"Game state:\n{summary}\n\n"
-                f"PRIORITY: The player just said to you: \"{voice}\"\n"
-                "Respond to what they said first (clap back), then tie it to the game state. One sentence."
-            )
-        else:
-            user_content = f"Game state:\n{summary}\n\nGive your coaching comment."
-        if chat:
-            user_content += (
-                f"\n\nLive chat ({len(chat)} messages):\n"
-                + "\n".join(f"  {m}" for m in chat)
-                + "\nGame first. If chat is saying something relevant or hilarious, mention it."
-            )
-        client = Groq(api_key=GROQ_KEY)
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user",   "content": user_content},
-            ],
-            max_tokens=MAX_TOKENS,
+def _groq_commentary(user_content: str) -> str:
+    client = Groq(api_key=GROQ_KEY)
+    response = client.chat.completions.create(
+        model=COACH_MODEL,
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user",   "content": user_content},
+        ],
+        max_tokens=MAX_TOKENS,
+    )
+    return response.choices[0].message.content.strip()
+
+def _gemini_commentary(user_content: str) -> str:
+    client = genai.Client(api_key=GEMINI_KEY)
+    response = client.models.generate_content(
+        model=COACH_MODEL,
+        contents=[genai_types.Part.from_text(text=user_content)],
+        config=genai_types.GenerateContentConfig(
+            system_instruction=prompt,
+            max_output_tokens=MAX_TOKENS,
+        ),
+    )
+    return response.text.strip()
+
+COMMENTARY_PROVIDERS = {"groq": _groq_commentary, "gemini": _gemini_commentary}
+
+def trigger_comment(summary: str, chat: list[str] = None, voice: str = "", urgent: bool = False):
+    if voice:
+        user_content = (
+            f"Game state:\n{summary}\n\n"
+            f"PRIORITY: The player just said to you: \"{voice}\"\n"
+            "Respond to what they said first (clap back), then tie it to the game state. One sentence."
         )
-        commentary = response.choices[0].message.content.strip()
-        ts = datetime.now().strftime("%H:%M:%S")
-        tag = " (voice)" if voice else ""
-        print(f"\n[{ts}] COACH{tag} >> {commentary}\n", flush=True)
-        speak(commentary)
+    elif urgent:
+        user_content = (
+            f"URGENT — this is happening RIGHT NOW, react with real intensity and urgency:\n"
+            f"Game state:\n{summary}\n\nGive your coaching comment."
+        )
+    else:
+        user_content = f"Game state:\n{summary}\n\nGive your coaching comment."
+    if chat:
+        user_content += (
+            f"\n\nLive chat ({len(chat)} messages):\n"
+            + "\n".join(f"  {m}" for m in chat)
+            + "\nGame first. If chat is saying something relevant or hilarious, mention it."
+        )
+
+    try:
+        commentary_fn = COMMENTARY_PROVIDERS.get(COACH_PROVIDER, _groq_commentary)
+        commentary = commentary_fn(user_content)
     except Exception as e:
-        print(f"  [Error: {e}]", flush=True)
+        print(f"  [{COACH_PROVIDER} commentary error, using canned fallback line: {e}]", flush=True)
+        commentary = _fallback_line(COACH_TONE)
+
+    ts = datetime.now().strftime("%H:%M:%S")
+    tag = " (voice)" if voice else ""
+    print(f"\n[{ts}] COACH{tag} >> {commentary}\n", flush=True)
+    speak(commentary)
 
 _speak_lock = threading.Lock()
+pygame.mixer.init()
+
+async def _edge_tts_bytes(text: str) -> bytes:
+    chunks = bytearray()
+    async for chunk in edge_tts.Communicate(text, FALLBACK_TTS_VOICE).stream():
+        if chunk["type"] == "audio":
+            chunks.extend(chunk["data"])
+    return bytes(chunks)
 
 def speak(text: str):
-    client = ElevenLabs(api_key=ELEVENLABS_KEY)
-    audio_gen = client.text_to_speech.convert(
-        voice_id=ELEVENLABS_VOICE_ID,
-        text=text,
-        model_id="eleven_multilingual_v2",
-        output_format="mp3_44100_128",
-    )
-    audio_bytes = b"".join(audio_gen)
-    tmp = tempfile.mktemp(suffix=".mp3")
+    audio_bytes = None
     try:
-        with open(tmp, "wb") as f:
-            f.write(audio_bytes)
-        with _speak_lock:
-            playsound(tmp)
-    finally:
+        client = ElevenLabs(api_key=ELEVENLABS_KEY)
+        audio_gen = client.text_to_speech.convert(
+            voice_id=ELEVENLABS_VOICE_ID,
+            text=text,
+            model_id="eleven_multilingual_v2",
+            output_format="mp3_44100_128",
+        )
+        audio_bytes = b"".join(audio_gen)
+    except Exception as e:
+        print(f"  [ElevenLabs error, falling back to edge-tts: {e}]", flush=True)
+
+    if audio_bytes is None:
         try:
-            os.unlink(tmp)
-        except Exception:
-            pass
+            audio_bytes = asyncio.run(_edge_tts_bytes(text))
+        except Exception as e:
+            print(f"  [edge-tts fallback also failed, skipping voice line: {e}]", flush=True)
+            return
+
+    with _speak_lock:
+        pygame.mixer.music.load(io.BytesIO(audio_bytes))
+        pygame.mixer.music.set_volume(COACH_VOLUME)
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            time.sleep(0.05)
 
 # ─── Voice Talk-Back (immediate) ──────────────────────────────────────────────
 
@@ -528,14 +742,15 @@ def run():
         sys.exit(1)
 
     game = os.getenv("COACH_GAME") or input("\n  Stream topic [CS2 Competitive]?\n  > ").strip() or "CS2 Competitive"
-    tone = os.getenv("COACH_TONE", "toxic-friend")
-    prompt = build_prompt(game, tone)
+    prompt = build_prompt(game, COACH_TONE)
 
     print(f"\n  Game   : {game}")
-    print(f"  Tone   : {tone}")
+    print(f"  Tone   : {COACH_TONE}")
     print(f"  Port   : localhost:{GSI_PORT}")
-    print(f"  Model  : llama-3.3-70b (text-only, no image tokens)")
+    print(f"  Model  : {COACH_PROVIDER} — {COACH_MODEL} (text-only, no image tokens)")
     print(f"  Voice  : ElevenLabs ({ELEVENLABS_VOICE_ID})")
+    active_context = [k for k, v in COACH_CONTEXT.items() if v]
+    print(f"  Context: {', '.join(active_context) if active_context else 'none'}")
     print("  Mic    : ON — say 'Coach' to talk back")
     print(f"\n  Waiting for CS2 to connect...\n")
 

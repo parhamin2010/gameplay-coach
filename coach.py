@@ -1,8 +1,9 @@
+import asyncio
 import base64
 import io
 import os
+import random
 import sys
-import tempfile
 import threading
 import time
 import wave
@@ -12,8 +13,11 @@ from datetime import datetime
 sys.stdout.reconfigure(encoding="utf-8")
 
 from groq import Groq
+from google import genai
+from google.genai import types as genai_types
 from elevenlabs.client import ElevenLabs
-from playsound import playsound
+import edge_tts
+import pygame
 import mss
 import numpy as np
 import sounddevice as sd
@@ -31,8 +35,18 @@ SCREENSHOT_H    = 540
 JPEG_QUALITY    = 60
 MAX_TOKENS      = 80
 GROQ_KEY        = os.getenv("GROQ_API_KEY", "")
+GEMINI_KEY      = os.getenv("GEMINI_API_KEY", "")
+COACH_PROVIDER  = (os.getenv("COACH_PROVIDER") or "groq").lower()
+DEFAULT_MODELS  = {
+    "groq":   "meta-llama/llama-4-scout-17b-16e-instruct",
+    "gemini": "gemini-2.0-flash",
+}
+COACH_MODEL     = os.getenv("COACH_MODEL") or DEFAULT_MODELS.get(COACH_PROVIDER, DEFAULT_MODELS["groq"])
+COACH_VOLUME    = max(0.0, min(1.0, float(os.getenv("COACH_VOLUME", "100")) / 100.0))
+COACH_TONE      = os.getenv("COACH_TONE", "toxic-friend")
 ELEVENLABS_KEY       = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID  = os.getenv("ELEVENLABS_VOICE_ID", "")
+FALLBACK_TTS_VOICE   = "en-US-GuyNeural"  # edge-tts (free, no quota) — used if ElevenLabs fails
 
 MIC_SAMPLE_RATE   = 16000
 MIC_WINDOW_SEC    = 60
@@ -270,14 +284,54 @@ def capture_screen() -> str:
         img.save(buf, format="JPEG", quality=JPEG_QUALITY)
         return base64.b64encode(buf.getvalue()).decode()
 
-# ─── AI Coach (Groq) ──────────────────────────────────────────────────────────
+# ─── AI Coach (Groq / Gemini) ─────────────────────────────────────────────────
 
-def get_commentary(shots: list[str], prompt: str, voice: str = "", chat: list[str] = None) -> str:
+def _fallback_line(tone: str) -> str:
+    """Canned in-character line pulled from the tone's own examples — used when
+    the commentary API is unavailable (quota/rate-limit) so the coach never goes silent."""
+    examples = TONES.get(tone, TONES["toxic-friend"])["examples"]
+    lines = [l.strip().lstrip("- ").strip('"') for l in examples.strip().split("\n") if l.strip()]
+    return random.choice(lines)
+
+def _groq_commentary(shots: list[str], prompt: str, user_text: str) -> str:
     content = [
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
         for b64 in shots
     ]
+    content.append({"type": "text", "text": user_text})
 
+    client = Groq(api_key=GROQ_KEY)
+    response = client.chat.completions.create(
+        model=COACH_MODEL,
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": content},
+        ],
+        max_tokens=MAX_TOKENS,
+    )
+    return response.choices[0].message.content.strip()
+
+def _gemini_commentary(shots: list[str], prompt: str, user_text: str) -> str:
+    parts = [
+        genai_types.Part.from_bytes(data=base64.b64decode(b64), mime_type="image/jpeg")
+        for b64 in shots
+    ]
+    parts.append(genai_types.Part.from_text(text=user_text))
+
+    client = genai.Client(api_key=GEMINI_KEY)
+    response = client.models.generate_content(
+        model=COACH_MODEL,
+        contents=parts,
+        config=genai_types.GenerateContentConfig(
+            system_instruction=prompt,
+            max_output_tokens=MAX_TOKENS,
+        ),
+    )
+    return response.text.strip()
+
+COMMENTARY_PROVIDERS = {"groq": _groq_commentary, "gemini": _gemini_commentary}
+
+def get_commentary(shots: list[str], prompt: str, voice: str = "", chat: list[str] = None) -> str:
     if voice:
         user_text = (
             f"These are {len(shots)} screenshots taken over the last minute of gameplay, in order.\n"
@@ -297,43 +351,52 @@ def get_commentary(shots: list[str], prompt: str, voice: str = "", chat: list[st
             + "\nGame first. If chat is saying something relevant or hilarious, mention it."
         )
 
-    content.append({"type": "text", "text": user_text})
+    try:
+        commentary_fn = COMMENTARY_PROVIDERS.get(COACH_PROVIDER, _groq_commentary)
+        return commentary_fn(shots, prompt, user_text)
+    except Exception as e:
+        print(f"  [{COACH_PROVIDER} commentary error, using canned fallback line: {e}]", flush=True)
+        return _fallback_line(COACH_TONE)
 
-    client = Groq(api_key=GROQ_KEY)
-    response = client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": content},
-        ],
-        max_tokens=MAX_TOKENS,
-    )
-    return response.choices[0].message.content.strip()
-
-# ─── Text-to-Speech (ElevenLabs) ─────────────────────────────────────────────
+# ─── Text-to-Speech (ElevenLabs, falls back to edge-tts) ────────────────────
 
 _speak_lock = threading.Lock()
+pygame.mixer.init()
+
+async def _edge_tts_bytes(text: str) -> bytes:
+    chunks = bytearray()
+    async for chunk in edge_tts.Communicate(text, FALLBACK_TTS_VOICE).stream():
+        if chunk["type"] == "audio":
+            chunks.extend(chunk["data"])
+    return bytes(chunks)
 
 def speak(text: str):
-    client = ElevenLabs(api_key=ELEVENLABS_KEY)
-    audio_gen = client.text_to_speech.convert(
-        voice_id=ELEVENLABS_VOICE_ID,
-        text=text,
-        model_id="eleven_multilingual_v2",
-        output_format="mp3_44100_128",
-    )
-    audio_bytes = b"".join(audio_gen)
-    tmp = tempfile.mktemp(suffix=".mp3")
+    audio_bytes = None
     try:
-        with open(tmp, "wb") as f:
-            f.write(audio_bytes)
-        with _speak_lock:
-            playsound(tmp)
-    finally:
+        client = ElevenLabs(api_key=ELEVENLABS_KEY)
+        audio_gen = client.text_to_speech.convert(
+            voice_id=ELEVENLABS_VOICE_ID,
+            text=text,
+            model_id="eleven_multilingual_v2",
+            output_format="mp3_44100_128",
+        )
+        audio_bytes = b"".join(audio_gen)
+    except Exception as e:
+        print(f"  [ElevenLabs error, falling back to edge-tts: {e}]", flush=True)
+
+    if audio_bytes is None:
         try:
-            os.unlink(tmp)
-        except Exception:
-            pass
+            audio_bytes = asyncio.run(_edge_tts_bytes(text))
+        except Exception as e:
+            print(f"  [edge-tts fallback also failed, skipping voice line: {e}]", flush=True)
+            return
+
+    with _speak_lock:
+        pygame.mixer.music.load(io.BytesIO(audio_bytes))
+        pygame.mixer.music.set_volume(COACH_VOLUME)
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            time.sleep(0.05)
 
 # ─── Voice Talk-Back (immediate) ──────────────────────────────────────────────
 
@@ -372,13 +435,13 @@ def run():
     raw_interval = os.getenv("COACH_INTERVAL") or input("\n  Interval in seconds [30]?\n  > ").strip()
     interval = int(raw_interval) if str(raw_interval).isdigit() else 30
     shot_interval = interval // NUM_SHOTS
-    tone = os.getenv("COACH_TONE", "toxic-friend")
 
-    prompt = build_prompt(game, tone)
+    prompt = build_prompt(game, COACH_TONE)
 
     print(f"\n  Game   : {game or 'Not specified'}")
     print(f"  Interval: {interval}s  |  Shots: {NUM_SHOTS} (every {shot_interval}s)")
-    print(f"  Tone   : {tone}")
+    print(f"  Tone   : {COACH_TONE}")
+    print(f"  Model  : {COACH_PROVIDER} — {COACH_MODEL}")
     print(f"  Voice  : ElevenLabs ({ELEVENLABS_VOICE_ID})")
     print("  Mic    : ON — say 'Coach' to talk back")
     print("\n  Online. Watching.\n", flush=True)

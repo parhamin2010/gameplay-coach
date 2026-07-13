@@ -29,13 +29,15 @@ NUM_SHOTS       = 3
 SCREENSHOT_W    = 960
 SCREENSHOT_H    = 540
 JPEG_QUALITY    = 60
-MAX_TOKENS      = 60
+MAX_TOKENS      = 80
 GROQ_KEY        = os.getenv("GROQ_API_KEY", "")
 ELEVENLABS_KEY       = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID  = os.getenv("ELEVENLABS_VOICE_ID", "")
 
-MIC_SAMPLE_RATE = 16000
-MIC_WINDOW_SEC  = 60
+MIC_SAMPLE_RATE   = 16000
+MIC_WINDOW_SEC    = 60
+WAKE_POLL_SEC     = 3    # how often we check the mic for "Coach"
+WAKE_WINDOW_SEC   = 8    # how much recent audio we check each poll
 
 # ─── Personality ──────────────────────────────────────────────────────────────
 
@@ -139,25 +141,33 @@ TONES = {
     },
     "trash-talker": {
         "identity": (
-            "You are a pure, unfiltered trash talker. Zero chill. You roast everything. "
-            "The disrespect is your love language, and you always back it up with exactly what just happened."
+            "You are a toxic, unhinged trashy streamer commentator — the kind that ends careers in one sentence. "
+            "You have no chill, no filter, and no mercy, and you take every mistake personally. "
+            "Your job is deep, soul-level impact: not a light jab, a full character assassination, always backed by what's on screen."
         ),
         "personality": (
-            "- Zero filter, full disrespect — but always grounded in what actually happened\n"
-            "- Street energy, casual, cutting, sharp\n"
-            "- The joke lands because it's also 100% true\n"
-            "- React like you're in a roast battle and the game is the material"
+            "- Brutal, ruthless, soul-crushing disrespect — but always grounded in what actually happened\n"
+            "- Street energy, savage, cutting, no punches pulled\n"
+            "- The joke lands because it's also 100% true — make it hurt, then twist it\n"
+            "- React like you're in a roast battle and going for the kill shot\n"
+            "- Every so often, pivot from the game to their life choices in general — brutally, like a roast comedian closing a set\n"
+            "- Never repeat the same joke structure twice in a row — keep the angles varied: skill, decision-making, potential, effort, excuses"
         ),
         "examples": (
             "- \"Bro is out here playing like he owes these enemies a favor.\"\n"
-            "- \"That aim was so bad I felt it in my soul.\"\n"
-            "- \"Cooked himself before the enemy even had a chance.\"\n"
-            "- \"Found a new way to lose and immediately committed to it, respect.\""
+            "- \"That aim was so bad it hurt just watching it happen.\"\n"
+            "- \"Cooked himself before the enemy even got a chance to react.\"\n"
+            "- \"Found a new way to lose and immediately committed to it.\"\n"
+            "- \"Zero awareness, zero plan, maximum confidence, deeply concerning combination.\"\n"
+            "- \"Maybe try a hobby that doesn't require reflexes, just a thought.\"\n"
+            "- \"That was a decision, and it was the wrong one, congratulations.\"\n"
+            "- \"Watching this is genuinely a character study in poor choices.\""
         ),
         "clap_back": (
             "- \"Big talk from the guy who just handed that kill over for free.\"\n"
-            "- \"Bro said something and then immediately proved me right, respect the timing.\"\n"
-            "- \"You talk like that and then do THAT? The audacity is genuinely impressive.\""
+            "- \"Said something and then immediately proved me right, respect the timing.\"\n"
+            "- \"You talk like that and then do THAT? Genuinely impressive audacity.\"\n"
+            "- \"Bold words from someone still figuring out which button shoots.\""
         ),
     },
 }
@@ -176,7 +186,9 @@ Personality:
 Rules:
 - English only — casual, sharp, zero filter
 - ONE sentence only. Never more.
+- SHORT — 12 to 18 words max. Not a word more.
 - React specifically to what happened in the screenshots — no generic lines
+- Once in a while (not every time), instead of a pure game roast, drop one line of brutally unsolicited "life advice" tied to how they're playing
 - No emojis. No "Called it". Vary your reactions every time.
 - If the player addressed you directly, respond to THEM first in your tone, then factor in the game.
 - If live chat messages are provided, you may reference them in your comment — but game always comes first. React to chat if it's funny, wrong, or matches what just happened.
@@ -209,11 +221,7 @@ def start_mic() -> sd.InputStream:
 
 COACH_TRIGGERS = ("coach",)
 
-def capture_and_transcribe() -> str:
-    """Transcribe the mic buffer. Returns text only if player addressed the coach."""
-    with _mic_lock:
-        data = np.array(list(_mic_buf), dtype=np.float32)
-
+def _transcribe(data: np.ndarray) -> str:
     if len(data) < MIC_SAMPLE_RATE * 1:
         return ""
 
@@ -231,14 +239,21 @@ def capture_and_transcribe() -> str:
             file=("mic.wav", wav_buf.getvalue()),
             model="whisper-large-v3-turbo",
         )
-        text = result.text.strip()
-        # Only return if the player directly addressed the coach
-        if any(t in text.lower() for t in COACH_TRIGGERS):
-            return text
-        return ""
+        return result.text.strip()
     except Exception as e:
         print(f"  [Whisper error: {e}]", flush=True)
         return ""
+
+def poll_for_wake_word() -> str:
+    """Check only the last WAKE_WINDOW_SEC of audio for 'Coach'. Fast + cheap, called on a tight loop."""
+    with _mic_lock:
+        data = np.array(list(_mic_buf)[-MIC_SAMPLE_RATE * WAKE_WINDOW_SEC:], dtype=np.float32)
+
+    text = _transcribe(data)
+    if text and any(t in text.lower() for t in COACH_TRIGGERS):
+        clear_mic_buffer()  # consumed — don't re-trigger on the same audio
+        return text
+    return ""
 
 def clear_mic_buffer():
     with _mic_lock:
@@ -297,6 +312,8 @@ def get_commentary(shots: list[str], prompt: str, voice: str = "", chat: list[st
 
 # ─── Text-to-Speech (ElevenLabs) ─────────────────────────────────────────────
 
+_speak_lock = threading.Lock()
+
 def speak(text: str):
     client = ElevenLabs(api_key=ELEVENLABS_KEY)
     audio_gen = client.text_to_speech.convert(
@@ -306,16 +323,38 @@ def speak(text: str):
         output_format="mp3_44100_128",
     )
     audio_bytes = b"".join(audio_gen)
-    tmp = tempfile.mktemp(suffix=".mp3", dir="D:/Personal/gameplay-coach")
+    tmp = tempfile.mktemp(suffix=".mp3")
     try:
         with open(tmp, "wb") as f:
             f.write(audio_bytes)
-        playsound(tmp)
+        with _speak_lock:
+            playsound(tmp)
     finally:
         try:
             os.unlink(tmp)
         except Exception:
             pass
+
+# ─── Voice Talk-Back (immediate) ──────────────────────────────────────────────
+
+def handle_voice_trigger(voice: str, prompt: str):
+    try:
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"[{ts}] [Mic] Player said: {voice}", flush=True)
+        shots = [capture_screen()]
+        chat = get_recent_chat(10)
+        commentary = get_commentary(shots, prompt, voice, chat)
+        print(f"\n  COACH (voice) >> {commentary}\n", flush=True)
+        speak(commentary)
+    except Exception as e:
+        print(f"  [Voice response error: {e}]", flush=True)
+
+def voice_listener_loop(prompt: str):
+    while True:
+        time.sleep(WAKE_POLL_SEC)
+        voice = poll_for_wake_word()
+        if voice:
+            threading.Thread(target=handle_voice_trigger, args=(voice, prompt), daemon=True).start()
 
 # ─── Main Loop ────────────────────────────────────────────────────────────────
 
@@ -346,6 +385,7 @@ def run():
 
     mic_stream = start_mic()
     start_chat_readers()
+    threading.Thread(target=voice_listener_loop, args=(prompt,), daemon=True).start()
 
     try:
         while True:
@@ -363,19 +403,13 @@ def run():
 
             ts = datetime.now().strftime("%H:%M:%S")
 
-            # Check if player addressed the coach during this gap
-            voice = capture_and_transcribe()
-            if voice:
-                print(f"  [Mic] Player said: {voice}", flush=True)
-                clear_mic_buffer()  # don't re-use same voice next cycle
-
             if not shots:
                 print(f"[{ts}] No screenshots captured, skipping cycle.", flush=True)
             else:
                 try:
                     print(f"[{ts}] Processing...", flush=True)
                     chat = get_recent_chat(10)
-                    commentary = get_commentary(shots, prompt, voice, chat)
+                    commentary = get_commentary(shots, prompt, "", chat)
                     print(f"\n  COACH >> {commentary}\n", flush=True)
                     speak(commentary)
                 except Exception as e:

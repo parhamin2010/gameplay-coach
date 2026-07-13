@@ -14,7 +14,7 @@ load_dotenv()
 
 app = Flask(__name__)
 
-PYTHON      = r"C:\Users\Parham's Huawei\AppData\Local\Python\bin\python.exe"
+PYTHON      = sys.executable
 COACH_DIR   = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(COACH_DIR, "last_session.json")
 
@@ -99,7 +99,16 @@ def _launch_coach(data: dict):
 @app.route("/")
 def index():
     current_voice = os.getenv("ELEVENLABS_VOICE_ID", "onwK4e9ZLuTAKqWW03F9")
-    return render_template("index.html", voices=VOICES, current_voice=current_voice)
+    return render_template(
+        "index.html",
+        voices=VOICES,
+        current_voice=current_voice,
+        twitch_token=os.getenv("TWITCH_TOKEN", ""),
+        twitch_channel=os.getenv("TWITCH_CHANNEL", ""),
+        youtube_api_key=os.getenv("YOUTUBE_API_KEY", ""),
+        youtube_video_id=os.getenv("YOUTUBE_VIDEO_ID", ""),
+        kick_channel=os.getenv("KICK_CHANNEL", ""),
+    )
 
 @app.route("/api/start", methods=["POST"])
 def start():

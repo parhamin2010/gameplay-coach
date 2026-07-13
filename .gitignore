@@ -1,5 +1,6 @@
 # Secrets
 .env
+last_session.json
 
 # Python
 __pycache__/
@@ -16,6 +17,9 @@ env/
 
 # Temp audio files
 *.mp3
+
+# App logs
+*.log
 
 # IDE
 .vscode/

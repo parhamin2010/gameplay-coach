@@ -438,8 +438,8 @@
             <span class="platform-pill" id="twitch-pill">OFF</span>
           </div>
           <div class="platform-fields" id="twitch-fields">
-            <input type="password" id="twitch-token"   placeholder="OAuth Token  (oauth:xxxxxxxxx)" oninput="saveSettings()" />
-            <input type="text"     id="twitch-channel" placeholder="Channel name" oninput="saveSettings()" />
+            <input type="password" id="twitch-token"   placeholder="OAuth Token  (oauth:xxxxxxxxx)" value="{{ twitch_token }}" oninput="saveSettings()" />
+            <input type="text"     id="twitch-channel" placeholder="Channel name" value="{{ twitch_channel }}" oninput="saveSettings()" />
           </div>
         </div>
 
@@ -452,8 +452,8 @@
             <span class="platform-pill" id="youtube-pill">OFF</span>
           </div>
           <div class="platform-fields" id="youtube-fields">
-            <input type="password" id="youtube-key"      placeholder="YouTube Data API v3 Key" oninput="saveSettings()" />
-            <input type="text"     id="youtube-video-id" placeholder="Live stream Video ID" oninput="saveSettings()" />
+            <input type="password" id="youtube-key"      placeholder="YouTube Data API v3 Key" value="{{ youtube_api_key }}" oninput="saveSettings()" />
+            <input type="text"     id="youtube-video-id" placeholder="Live stream Video ID" value="{{ youtube_video_id }}" oninput="saveSettings()" />
           </div>
         </div>
 
@@ -466,7 +466,7 @@
             <span class="platform-pill" id="kick-pill">OFF</span>
           </div>
           <div class="platform-fields" id="kick-fields">
-            <input type="text" id="kick-channel" placeholder="Channel slug  (e.g. shroud)" oninput="saveSettings()" />
+            <input type="text" id="kick-channel" placeholder="Channel slug  (e.g. shroud)" value="{{ kick_channel }}" oninput="saveSettings()" />
           </div>
         </div>
 
@@ -679,8 +679,15 @@
     return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
+  function autoTogglePlatforms() {
+    if (document.getElementById('twitch-token').value && !platforms.twitch) togglePlatform('twitch');
+    if (document.getElementById('youtube-key').value && !platforms.youtube) togglePlatform('youtube');
+    if (document.getElementById('kick-channel').value && !platforms.kick) togglePlatform('kick');
+  }
+
   // Restore settings and check if already running on page load
   loadSettings();
+  autoTogglePlatforms();
   fetch('/api/status').then(r => r.json()).then(d => {
     if (d.running) { setRunning(true); startSSE(); }
   });
